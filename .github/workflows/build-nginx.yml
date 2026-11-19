@@ -8,7 +8,7 @@ on:
         required: true
         default: '1.30.7'
       fd_setsize:
-        description: 'FD_SETSIZE (突破1024)'
+        description: 'FD_SETSIZE (1024 以上)'
         required: true
         default: '4096'
       pcre2_version:
@@ -16,7 +16,7 @@ on:
         required: true
         default: '10.46'
       zlib_version:
-        description: 'zlib version'
+        description: 'zlib version (zlib.net 当前根目录最新版)'
         required: true
         default: '1.4'
       openssl_version:
@@ -38,7 +38,7 @@ jobs:
         with:
           perl-version: '5.38'
 
-      - name: Setup MSYS2 (provides sed/make)
+      - name: Setup MSYS2 (provides sed and make)
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
@@ -47,78 +47,74 @@ jobs:
       - name: Download sources
         shell: bash
         run: |
+          set -euo pipefail
           NGINX_VER=${{ github.event.inputs.nginx_version }}
           PCRE_VER=${{ github.event.inputs.pcre2_version }}
           ZLIB_VER=${{ github.event.inputs.zlib_version }}
           SSL_VER=${{ github.event.inputs.openssl_version }}
 
-          curl -LO https://nginx.org/download/nginx-$NGINX_VER.tar.gz
-          tar -xzf nginx-$NGINX_VER.tar.gz
+          download() {
+            curl -fSL --retry 3 --retry-delay 5 --connect-timeout 30 -o $2 $1
+            magic=$(xxd -l 2 -p $2)
+            if [ $magic = 1f8b ]; then
+              echo OK $2
+            else
+              echo BADFILE $2 $magic
+              head -c 200 $2
+              exit 1
+            fi
+          }
+
+          # 1. nginx 本体
+          download https://nginx.org/download/nginx-$NGINX_VER.tar.gz nginx.tar.gz
+          tar -xzf nginx.tar.gz
           mv nginx-$NGINX_VER nginx
           cd nginx
           mkdir -p objs/lib
 
-          curl -L -o pcre2.tar.gz https://github.com/PCRE2Project/pcre2/releases/download/pcre2-$PCRE_VER/pcre2-$PCRE_VER.tar.gz
-          curl -L -o zlib.tar.gz  https://zlib.net/zlib-$ZLIB_VER.tar.gz
-          curl -L -o openssl.tar.gz https://github.com/openssl/openssl/releases/download/openssl-$SSL_VER/openssl-$SSL_VER.tar.gz
+          # 2. PCRE2 (GitHub release 直链, tag 与文件名都是 pcre2-版本号)
+          download https://github.com/PCRE2Project/pcre2/releases/download/pcre2-$PCRE_VER/pcre2-$PCRE_VER.tar.gz pcre2.tar.gz
+          tar -xzf pcre2.tar.gz -C objs/lib
 
-          tar -xzf pcre2.tar.gz   -C objs/lib
-          tar -xzf zlib.tar.gz    -C objs/lib
+          # 3. zlib (zlib.net 根目录当前挂着最新版 1.4; 若将来 404 改 GitHub 镜像 v 前缀)
+          download https://zlib.net/zlib-$ZLIB_VER.tar.gz zlib.tar.gz
+          tar -xzf zlib.tar.gz -C objs/lib
+
+          # 4. OpenSSL (GitHub release 直链, tag 与文件名都是 openssl-版本号)
+          download https://github.com/openssl/openssl/releases/download/openssl-$SSL_VER/openssl-$SSL_VER.tar.gz openssl.tar.gz
           tar -xzf openssl.tar.gz -C objs/lib
-          ls objs/lib
 
-      - name: Patch MSVC version detection
-        shell: bash
-        working-directory: nginx
-        run: |
-          # 若新版 VS 导致 configure 无法识别编译器版本，取消下面注释并按实际版本改
-          # sed -i 's/NGX_MSVC_VER=.*/NGX_MSVC_VER="19.40"/' auto/cc/msvc
-          echo "skip if configure works"
+          echo objs lib list:
+          ls -lh objs/lib
+          echo self check:
+          ls -l auto/configure
 
       - name: Configure
         shell: bash
-        working-directory: nginx
         run: |
+          cd nginx
+          pwd
+          ls -l auto/configure
           PCRE_VER=${{ github.event.inputs.pcre2_version }}
           ZLIB_VER=${{ github.event.inputs.zlib_version }}
           SSL_VER=${{ github.event.inputs.openssl_version }}
 
-          auto/configure \
-            --with-cc=cl \
-            --prefix= \
-            --conf-path=conf/nginx.conf \
-            --pid-path=logs/nginx.pid \
-            --http-log-path=logs/access.log \
-            --error-log-path=logs/error.log \
-            --sbin-path=nginx.exe \
-            --http-client-body-temp-path=temp/client_body_temp \
-            --http-proxy-temp-path=temp/proxy_temp \
-            --http-fastcgi-temp-path=temp/fastcgi_temp \
-            --http-scgi-temp-path=temp/scgi_temp \
-            --http-uwsgi-temp-path=temp/uwsgi_temp \
-            --with-cc-opt=-DFD_SETSIZE=${{ github.event.inputs.fd_setsize }} \
-            --with-pcre=objs/lib/pcre2-$PCRE_VER \
-            --with-zlib=objs/lib/zlib-$ZLIB_VER \
-            --with-openssl=objs/lib/openssl-$SSL_VER \
-            --with-openssl-opt=no-asm \
-            --with-http_ssl_module \
-            --with-http_v2_module
+          ./auto/configure --with-cc=cl --prefix= --conf-path=conf/nginx.conf --pid-path=logs/nginx.pid --http-log-path=logs/access.log --error-log-path=logs/error.log --sbin-path=nginx.exe --http-client-body-temp-path=temp/client_body_temp --http-proxy-temp-path=temp/proxy_temp --http-fastcgi-temp-path=temp/fastcgi_temp --http-scgi-temp-path=temp/scgi_temp --http-uwsgi-temp-path=temp/uwsgi_temp --with-cc-opt=-DFD_SETSIZE=${{ github.event.inputs.fd_setsize }} --with-pcre=objs/lib/pcre2-$PCRE_VER --with-zlib=objs/lib/zlib-$ZLIB_VER --with-openssl=objs/lib/openssl-$SSL_VER --with-openssl-opt=no-asm --with-pcre-jit --with-http_ssl_module --with-http_v2_module --with-http_stub_status_module --with-http_realip_module --with-http_gzip_static_module --with-http_gunzip_module --with-http_auth_request_module --with-http_slice_module --with-http_sub_module --with-stream --with-stream_ssl_module --with-stream_realip_module
 
       - name: Build
         shell: cmd
-        working-directory: nginx
-        run: nmake -f objs/Makefile
+        run: cd nginx && nmake -f objs/Makefile
 
       - name: Verify build
         shell: bash
-        working-directory: nginx
         run: |
+          cd nginx
           ./objs/nginx.exe -V
 
       - name: Package
         shell: bash
         run: |
-          mkdir dist
+          mkdir -p dist
           cp nginx/objs/nginx.exe dist/
           cp -r nginx/conf dist/
           cd dist

@@ -1,4 +1,4 @@
-name: Build nginx for Windows
+name: Build nginx for Windows (x64)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
       fd_setsize:
         description: 'FD_SETSIZE (1024 以上)'
         required: true
-        default: '4096'
+        default: '8192'
       pcre2_version:
         description: 'PCRE2 version'
         required: true
@@ -28,7 +28,7 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - name: Setup MSVC
+      - name: Setup MSVC (x64)
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -37,12 +37,7 @@ jobs:
         uses: shogo82148/actions-setup-perl@v1
         with:
           perl-version: '5.38'
-
-      - name: Setup MSYS2 (provides sed and make)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          install: sed make
+          distribution: strawberry
 
       - name: Download sources
         shell: bash
@@ -54,75 +49,125 @@ jobs:
           SSL_VER=${{ github.event.inputs.openssl_version }}
 
           download() {
-            curl -fSL --retry 3 --retry-delay 5 --connect-timeout 30 -o $2 $1
-            magic=$(xxd -l 2 -p $2)
-            if [ $magic = 1f8b ]; then
-              echo OK $2
+            curl -fSL --retry 3 --retry-delay 5 --connect-timeout 30 -o "$2" "$1"
+            magic=$(xxd -l 2 -p "$2")
+            if [ "$magic" = "1f8b" ]; then
+              echo "OK $2"
             else
-              echo BADFILE $2 $magic
-              head -c 200 $2
+              echo "BADFILE $2 $magic"
+              head -c 200 "$2"
               exit 1
             fi
           }
 
           # 1. nginx 本体
-          download https://nginx.org/download/nginx-$NGINX_VER.tar.gz nginx.tar.gz
+          download "https://nginx.org/download/nginx-${NGINX_VER}.tar.gz" nginx.tar.gz
           tar -xzf nginx.tar.gz
-          mv nginx-$NGINX_VER nginx
+          mv "nginx-${NGINX_VER}" nginx
           cd nginx
           mkdir -p objs/lib
 
-          # 2. PCRE2 (GitHub release 直链, tag 与文件名都是 pcre2-版本号)
-          download https://github.com/PCRE2Project/pcre2/releases/download/pcre2-$PCRE_VER/pcre2-$PCRE_VER.tar.gz pcre2.tar.gz
+          # 2. PCRE2
+          download "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE_VER}/pcre2-${PCRE_VER}.tar.gz" pcre2.tar.gz
           tar -xzf pcre2.tar.gz -C objs/lib
 
-          # 3. zlib (zlib.net 根目录当前挂着最新版 1.4; 若将来 404 改 GitHub 镜像 v 前缀)
-          download https://zlib.net/zlib-$ZLIB_VER.tar.gz zlib.tar.gz
+          # 3. zlib
+          download "https://zlib.net/zlib-${ZLIB_VER}.tar.gz" zlib.tar.gz
           tar -xzf zlib.tar.gz -C objs/lib
 
-          # 4. OpenSSL (GitHub release 直链, tag 与文件名都是 openssl-版本号)
-          download https://github.com/openssl/openssl/releases/download/openssl-$SSL_VER/openssl-$SSL_VER.tar.gz openssl.tar.gz
+          # 4. OpenSSL
+          download "https://github.com/openssl/openssl/releases/download/openssl-${SSL_VER}/openssl-${SSL_VER}.tar.gz" openssl.tar.gz
           tar -xzf openssl.tar.gz -C objs/lib
 
-          echo objs lib list:
+          echo "objs/lib list:"
           ls -lh objs/lib
-          echo self check:
-          ls -l auto/configure
+          echo "self check:"
+          ls -l configure
+
+      - name: Patch for Windows x64
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd nginx
+
+          # 1. 强制 OpenSSL 使用 VC-WIN64A (兼容不同版本 nginx 的 makefile.msvc)
+          sed -i 's/\$(OPENSSL_TARGET)/VC-WIN64A/g; s/VC-WIN32/VC-WIN64A/g; s|ms\\do_ms|ms\\do_win64a|g' auto/lib/openssl/makefile.msvc
+
+          # 2. 关闭 MSVC 将警告视为错误 (-WX)，避免新版编译器或 FD_SETSIZE 重定义警告中断编译
+          sed -i 's/CFLAGS="\$CFLAGS -WX"/# CFLAGS="$CFLAGS -WX"/' auto/cc/msvc
+
+          echo "--- auto/lib/openssl/makefile.msvc ---"
+          cat auto/lib/openssl/makefile.msvc
 
       - name: Configure
         shell: bash
         run: |
+          set -euo pipefail
           cd nginx
-          pwd
-          ls -l auto/configure
           PCRE_VER=${{ github.event.inputs.pcre2_version }}
           ZLIB_VER=${{ github.event.inputs.zlib_version }}
           SSL_VER=${{ github.event.inputs.openssl_version }}
 
-          ./auto/configure --with-cc=cl --prefix= --conf-path=conf/nginx.conf --pid-path=logs/nginx.pid --http-log-path=logs/access.log --error-log-path=logs/error.log --sbin-path=nginx.exe --http-client-body-temp-path=temp/client_body_temp --http-proxy-temp-path=temp/proxy_temp --http-fastcgi-temp-path=temp/fastcgi_temp --http-scgi-temp-path=temp/scgi_temp --http-uwsgi-temp-path=temp/uwsgi_temp --with-cc-opt=-DFD_SETSIZE=${{ github.event.inputs.fd_setsize }} --with-pcre=objs/lib/pcre2-$PCRE_VER --with-zlib=objs/lib/zlib-$ZLIB_VER --with-openssl=objs/lib/openssl-$SSL_VER --with-openssl-opt=no-asm --with-pcre-jit --with-http_ssl_module --with-http_v2_module --with-http_stub_status_module --with-http_realip_module --with-http_gzip_static_module --with-http_gunzip_module --with-http_auth_request_module --with-http_slice_module --with-http_sub_module --with-stream --with-stream_ssl_module --with-stream_realip_module
+          ./configure \
+            --with-cc=cl \
+            --prefix= \
+            --conf-path=conf/nginx.conf \
+            --pid-path=logs/nginx.pid \
+            --http-log-path=logs/access.log \
+            --error-log-path=logs/error.log \
+            --sbin-path=nginx.exe \
+            --http-client-body-temp-path=temp/client_body_temp \
+            --http-proxy-temp-path=temp/proxy_temp \
+            --http-fastcgi-temp-path=temp/fastcgi_temp \
+            --http-scgi-temp-path=temp/scgi_temp \
+            --http-uwsgi-temp-path=temp/uwsgi_temp \
+            --with-cc-opt=-DFD_SETSIZE=${{ github.event.inputs.fd_setsize }} \
+            --with-pcre=objs/lib/pcre2-${PCRE_VER} \
+            --with-zlib=objs/lib/zlib-${ZLIB_VER} \
+            --with-openssl=objs/lib/openssl-${SSL_VER} \
+            --with-openssl-opt=no-asm \
+            --with-pcre-jit \
+            --with-http_ssl_module \
+            --with-http_v2_module \
+            --with-http_stub_status_module \
+            --with-http_realip_module \
+            --with-http_gzip_static_module \
+            --with-http_gunzip_module \
+            --with-http_auth_request_module \
+            --with-http_slice_module \
+            --with-http_sub_module \
+            --with-stream \
+            --with-stream_ssl_module \
+            --with-stream_realip_module
 
       - name: Build
         shell: cmd
-        run: cd nginx && nmake -f objs/Makefile
+        run: cd nginx && nmake -f objs/Makefile binary
 
       - name: Verify build
         shell: bash
         run: |
+          set -euo pipefail
           cd nginx
+          file ./objs/nginx.exe
           ./objs/nginx.exe -V
 
       - name: Package
         shell: bash
         run: |
-          mkdir -p dist
+          set -euo pipefail
+          mkdir -p dist/logs dist/temp
           cp nginx/objs/nginx.exe dist/
           cp -r nginx/conf dist/
+          if [ -d nginx/docs/html ]; then
+            cp -r nginx/docs/html dist/html
+          fi
           cd dist
-          zip -r nginx-windows-fd${{ github.event.inputs.fd_setsize }}.zip .
+          7z a -tzip "../nginx-windows-fd${{ github.event.inputs.fd_setsize }}.zip" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: nginx-windows-fd${{ github.event.inputs.fd_setsize }}
-          path: dist/*.zip
+          path: nginx-windows-fd*.zip
           retention-days: 30

@@ -1,4 +1,4 @@
-name: Build nginx for Windows (x64)
+name: Build nginx for Windows (x64 Hardened)
 
 on:
   workflow_dispatch:
@@ -16,13 +16,13 @@ on:
         required: true
         default: '10.46'
       zlib_version:
-        description: 'zlib version (zlib.net 当前根目录最新版)'
+        description: 'zlib version'
         required: true
         default: '1.4'
       openssl_version:
-        description: 'OpenSSL version'
+        description: 'OpenSSL version (建议 3.5.x LTS)'
         required: true
-        default: '3.0.14'
+        default: '3.5.9'
 
 jobs:
   build:
@@ -38,6 +38,16 @@ jobs:
         with:
           perl-version: '5.38'
           distribution: strawberry
+
+      - name: Setup NASM (OpenSSL ASM acceleration)
+        uses: ilammy/setup-nasm@v1
+
+      - name: Verify toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          nasm -v
+          perl -v | head -n 3
 
       - name: Download sources
         shell: bash
@@ -60,28 +70,22 @@ jobs:
             fi
           }
 
-          # 1. nginx 本体
           download "https://nginx.org/download/nginx-${NGINX_VER}.tar.gz" nginx.tar.gz
           tar -xzf nginx.tar.gz
           mv "nginx-${NGINX_VER}" nginx
           cd nginx
           mkdir -p objs/lib
 
-          # 2. PCRE2
           download "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE_VER}/pcre2-${PCRE_VER}.tar.gz" pcre2.tar.gz
           tar -xzf pcre2.tar.gz -C objs/lib
 
-          # 3. zlib
           download "https://zlib.net/zlib-${ZLIB_VER}.tar.gz" zlib.tar.gz
           tar -xzf zlib.tar.gz -C objs/lib
 
-          # 4. OpenSSL
           download "https://github.com/openssl/openssl/releases/download/openssl-${SSL_VER}/openssl-${SSL_VER}.tar.gz" openssl.tar.gz
           tar -xzf openssl.tar.gz -C objs/lib
 
-          echo "objs/lib list:"
           ls -lh objs/lib
-          echo "self check:"
           ls -l configure
 
       - name: Patch for Windows x64
@@ -90,13 +94,12 @@ jobs:
           set -euo pipefail
           cd nginx
 
-          # 1. 强制 OpenSSL 使用 VC-WIN64A (兼容不同版本 nginx 的 makefile.msvc)
+          # 强制 OpenSSL 使用 VC-WIN64A
           sed -i 's/\$(OPENSSL_TARGET)/VC-WIN64A/g; s/VC-WIN32/VC-WIN64A/g; s|ms\\do_ms|ms\\do_win64a|g' auto/lib/openssl/makefile.msvc
 
-          # 2. 关闭 MSVC 将警告视为错误 (-WX)，避免新版编译器或 FD_SETSIZE 重定义警告中断编译
+          # 关闭 -WX 避免新版 MSVC 警告中断编译
           sed -i 's/CFLAGS="\$CFLAGS -WX"/# CFLAGS="$CFLAGS -WX"/' auto/cc/msvc
 
-          echo "--- auto/lib/openssl/makefile.msvc ---"
           cat auto/lib/openssl/makefile.msvc
 
       - name: Configure
@@ -125,7 +128,6 @@ jobs:
             --with-pcre=objs/lib/pcre2-${PCRE_VER} \
             --with-zlib=objs/lib/zlib-${ZLIB_VER} \
             --with-openssl=objs/lib/openssl-${SSL_VER} \
-            --with-openssl-opt=no-asm \
             --with-pcre-jit \
             --with-http_ssl_module \
             --with-http_v2_module \
@@ -136,9 +138,11 @@ jobs:
             --with-http_auth_request_module \
             --with-http_slice_module \
             --with-http_sub_module \
+            --with-http_secure_link_module \
             --with-stream \
             --with-stream_ssl_module \
-            --with-stream_realip_module
+            --with-stream_realip_module \
+            --with-stream_ssl_preread_module
 
       - name: Build
         shell: cmd
